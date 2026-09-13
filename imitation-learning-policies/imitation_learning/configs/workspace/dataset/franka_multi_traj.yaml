@@ -1,0 +1,40 @@
+defaults:
+  - franka_single_traj
+  - _self_
+
+_target_: imitation_learning.datasets.franka_dataset.FrankaMultiTrajDataset
+
+# traj_num is set per task (see task/franka_*.yaml) so history is full after the first
+# max_history_len trajectories, matching inference.
+traj_num: ???
+traj_interval_min: 8
+traj_interval_max: 8
+
+# [JSC] batch_size 4, from real_world_multi_traj.yaml -- NOT the 64 this file would
+# otherwise inherit from franka_single_traj.
+#
+# The two numbers mean different things. In a SINGLE-traj dataset one sample is one
+# timestep, so 64 is 64 timesteps. In a MULTI-traj dataset one sample is a whole stack of
+# traj_num trajectory chunks, each contributing an image per camera, and the vision tower is
+# finetuned (trainer finetune_keywords: shared_model_manager), so every one of those images
+# keeps its activations for the backward pass. Upstream states the arithmetic in these files:
+# "The actual batch size is 4 * 40 (traj_num) = 160" (real_world), "4 * 72 = 288" (iphumi),
+# "2 * 64 = 128" (robomimic). Every multi-traj config overrides down to 2-4; ours did not.
+#
+# At the inherited 64 all eight ranks filled 95 GB and died inside SiglipEncoderLayer; at 32
+# they still did. 4 x traj_num(17) x 2 cameras = 136 images per rank-step, against
+# upstream's 4 x 36 x 1 = 144 for their real-robot task -- the same working set.
+dataloader_cfg:
+  batch_size: 4
+  # 24 workers x 4 ranks per node oversubscribes 48 CPUs; train_real.sh drops to 12.
+  num_workers: 12
+
+# Every other *_multi_traj config defines this and ours did not, so the held-out split was
+# being loaded with the TRAINING batch size -- a second OOM waiting at the first validation.
+split_dataloader_cfg:
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  shuffle: false
+  prefetch_factor: 1

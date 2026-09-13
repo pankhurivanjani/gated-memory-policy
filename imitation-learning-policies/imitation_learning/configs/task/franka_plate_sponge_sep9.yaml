@@ -1,0 +1,116 @@
+
+defaults:
+  - _self_
+
+dataset_type: franka
+
+workspace:
+  # JSC single-arm Franka, converted from the LeRobot memmap by jsc/memmap_to_zarr.py.
+  # Same source the SSM policy trains on, so both see byte-identical pixels and actions.
+  # sponge -> plate -> return to original position
+  # 50 episodes, ~430 frames each.
+  train_dataset:
+
+    name: plate_sponge_sep9
+    robot_num: 1
+
+    # [JSC] Upstream gives the NON-memory policy more passes per epoch than the memory one,
+    # because a memory sample carries traj_num trajectory chunks and so costs far more per
+    # sample. real_world_iterative_casting -- their real-robot, multi-traj, single task, the
+    # closest analogue to ours -- uses exactly this expression. Our configs inherited a flat
+    # 10 from franka_single_traj, which left pi training on a quarter of the passes its
+    # authors intend while pi_mem was unaffected: a handicap invented by us, on the baseline
+    # arm we are comparing against.
+    repeat_dataset_num: ${cond:${in:${policy_name},memory,gated,midhist,longhist},10,40}
+
+
+    # [JSC] traj_interval widened from GMP's default of 8.
+    # GMP's history reaches back max_history_len(16) x traj_interval frames. At the default 8
+    # that is 128 frames, which covers 86% of a robomimic episode (~148 frames) but only
+    # 30% of ours (~430). For this task the memory-relevant event is at the START of the
+    # episode, so a 128-frame window would never see it and GMP would fail the memory leg for
+    # a reason unrelated to its method.
+    # 27 x 16 = 432 frames ~= one full episode. Their history is already sparse by design
+    # (one image per trajectory chunk, paper 3.2), so widening the stride costs nothing:
+    # still 16 attended chunks, same compute. This is a deliberate deviation from their
+    # defaults, forced by our episodes being 2.9x longer, and must be reported as such.
+    traj_interval_min: 27
+    traj_interval_max: 27
+    # traj_num = max_history_len + 1, so the history is full (their own commented default).
+    traj_num: 17
+
+    image_keys:
+      - front_rgb
+      - wrist_rgb
+
+    source_data_meta:
+      front_rgb:
+        name: front_rgb
+        include_indices: ${workspace.model.image_indices}
+        shape: [224, 224, 3]
+      wrist_rgb:
+        name: wrist_rgb
+        include_indices: ${workspace.model.image_indices}
+        shape: [224, 224, 3]
+
+    output_data_meta:
+      front_rgb:
+        name: front_rgb
+        data_type: image
+        length: ${workspace.model.image_length}
+        normalizer: identity
+        # [JSC] RandomCrop -> Resize(256) -> ColorJitter, GMP's own recipe.
+        # The Resize is NOT optional: the encoder is google/siglip2-base-patch16-256, whose
+        # position embedding is a fixed 16x16=256 table, and token_num is derived as
+        # (image_size // patch_size)**2, so every downstream projector is sized for 256 too.
+        # Feeding our native 224 gives 196 patches and dies in
+        # SiglipVisionEmbeddings.forward: "size of tensor a (196) must match tensor b (256)".
+        # Upstream upsamples from whatever it has -- mikasa is natively 128 and goes to 256 --
+        # so 224->256 is the mildest such upsample in the repo, not a deviation.
+        # The crop keeps GMP's designed translation augmentation at their 87.5% ratio
+        # (256->224 there, 224->196 here); our SSM policy uses ColorJitter only, but handing
+        # the baseline its authors' augmentation is the fair direction to err in.
+        augmentation:
+          - name: RandomCrop
+            size: [196, 196]
+            p: 0.3
+          - name: Resize
+            size: [256, 256]
+            antialias: True
+          - name: ColorJitter
+            brightness: 0.3
+            contrast: 0.4
+            saturation: 0.5
+            hue: 0.08
+            p: 0.3
+        shape: [3, 256, 256]
+        source_entry_names:
+          - front_rgb
+      wrist_rgb:
+        name: wrist_rgb
+        data_type: image
+        length: ${workspace.model.image_length}
+        normalizer: identity
+        augmentation:
+          - name: RandomCrop
+            size: [196, 196]
+            p: 0.3
+          - name: Resize
+            size: [256, 256]
+            antialias: True
+          - name: ColorJitter
+            brightness: 0.3
+            contrast: 0.4
+            saturation: 0.5
+            hue: 0.08
+            p: 0.3
+        shape: [3, 256, 256]
+        source_entry_names:
+          - wrist_rgb
+
+  model:
+
+    memory_gate:
+      image_encoder:
+        image_meta: ${workspace.train_dataset.output_data_meta.front_rgb}
+      proprio_meta: ${workspace.train_dataset.output_data_meta.robot0_8d}

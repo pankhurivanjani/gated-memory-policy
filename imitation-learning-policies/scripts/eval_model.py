@@ -48,7 +48,21 @@ def eval_model(
             "robomimic_transport_ph": 90,
             "robomimic_transport_mh": 90,
             "iphumi_place_back": 50,
-            "real_world_iterative_casting": 40
+            "real_world_iterative_casting": 40,
+            # [JSC] Evaluation starts at each episode's FIRST frame (starting_percentile_max=0
+            # just above) and walks forward with a FIXED stride (traj_interval_min is forced to
+            # traj_interval_max below), so traj_num here decides how far into an episode the
+            # error statistics reach: traj_num x traj_interval frames. Anything short of the
+            # LONGEST episode silently produces no labels for its tail, and base_dataset drops
+            # unlabelled indices from the gate's training pool without comment.
+            #   sponge   543 frames max / 27 stride = 20.1 -> 21
+            #   plant   1200 frames max / 51 stride = 23.5 -> 24
+            #   pottimer 960 frames max / 56 stride = 17.1 -> 18
+            # All exceed the training traj_num of 17, matching how upstream sets these
+            # (real_world trains at 36 and evaluates at 40).
+            "franka_plate_sponge_sep9": 21,
+            "franka_plant_flower_2scoops": 24,
+            "franka_pottimer": 18,
         }
         if config["task_name"] in dataset_traj_max_nums:
             config["workspace"]["train_dataset"]["traj_num"] = dataset_traj_max_nums[config["task_name"]]
