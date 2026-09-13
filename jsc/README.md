@@ -90,3 +90,63 @@ weights with `strict=False`, so the policy can warm-start from the `pi_mem` chec
 Not uniform, and the baselines must match whatever the comparison uses:
 `plate_sponge_sep9` has NO held-out split and is evaluated train-fit; `plant_flower_2scoops`
 and `pottimer` report on `test`.
+
+## 6. Evaluating on the real robot
+
+GMP is served, not embedded: the policy runs as a server on a GPU machine and the robot sends
+observations to it over the network. Start it with
+
+    shell_scripts/serve_policy_ckpt.sh <ckpt_path> <gpu_id>
+
+or directly, which is what that script wraps:
+
+    python scripts/run_policy_server.py \
+      --ckpt_path data/franka_<task>/<date>/<time>_<task>_pi_mem/checkpoints/epoch_20_*.ckpt \
+      --server_endpoint tcp://0.0.0.0:18765 --device cuda
+
+The port defaults to `gpu_id + 18765`. Transport is `robotmq` (`RMQServer`), request/reply,
+with these topics:
+
+    policy_inference        send an observation dict, get an action dict back
+    policy_reset            clear the memory/history between episodes -- REQUIRED, see below
+    policy_config           query what the loaded checkpoint expects
+    new_checkpoint_loaded   hot-swap a checkpoint without restarting
+    done_rollout            end of episode
+    export_recorded_data    dump what the server recorded
+
+The request payload is a `robotmq.serialize`d dict carrying `episode_idx` plus the
+observation entries named in the task config (`front_rgb`, `wrist_rgb`, `robot0_8d`). A scalar
+`episode_idx` is treated as a single un-batched episode and the batch dimension is added and
+removed for you. The reply is a dict of action arrays.
+
+**The client is not in this repo.** It lives in the `real-env` submodule
+(`git@github.com:real-stanford/real-env.git`), which is not checked out here and is
+lab-specific anyway, so the robot side has to be written against your own Franka stack. The
+protocol above is all it needs.
+
+**Call `policy_reset` between episodes.** The memory policy accumulates trajectory history,
+so without a reset episode N sees episode N-1's context and the numbers quietly drift. Note
+that on this side `reset()` also clears the shared vision-model registry, which is the same
+global that breaks two policies sharing one process -- one policy per server process.
+
+### Hardware
+
+Fits comfortably on the robot PC. Measured parameter counts:
+
+| policy | params | fp16 weights |
+|---|---|---|
+| GMP `pi_mem` | 189 M (107 M SigLIP2 + 82 M denoising net) | 0.38 GB |
+| our SSM policy | 642 M (423 M frozen DINOv2+T5) | 1.28 GB |
+| MemoryVLA | 8377 M (6.7 B Llama-2 backbone) | 16.8 GB |
+
+GMP runs on an 8 GB card directly, so the server can sit on the robot PC itself and the
+network hop is optional. MemoryVLA cannot: 16.8 GB of weights does not fit an RTX 4060, or a
+16 GB 4060 Ti, before any activations -- it has to be served from a bigger GPU or quantised.
+
+### Offline comparison
+
+For open-loop MAE against the SSM policy, evaluation does NOT need the robot and does not use
+this server: it replays recorded observations from the memmap. See the harness at
+`wt-main/scripts/openloop_memmap.py` and its MemoryVLA counterpart
+`baselines/MemoryVLA/jsc/openloop_memvla.py`. Match the split per task (see above) and the
+action execution horizon of whatever numbers you are comparing against.
