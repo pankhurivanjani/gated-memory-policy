@@ -1,4 +1,5 @@
 import os
+import re
 import tqdm
 import dill
 import matplotlib.pyplot as plt
@@ -121,10 +122,20 @@ def calc_statistics(pred_results_path: str, gripper_scale: float = 0.05, action_
     # else:
     #     raise ValueError("No normalized ema mse found")
 
-    variance_key = "ema_action0_10d"
-    gt_key = "gt_action0_10d"
-    mse_key = "ema_action0_10d_mse"
-    normalizer_key = "action0_10d"
+    # [JSC] Derive the action dimensionality instead of hardcoding 10.
+    # 10d is this repo's UMI convention (3 position + 6d rotation + 1 gripper). The JSC Franka
+    # data is 8d joint space (7 joints + gripper), so every one of these keys was absent and
+    # calc_statistics died with KeyError: 'ema_action0_10d' AFTER both evaluation arms had
+    # run -- the most expensive possible place to discover a naming mismatch.
+    _dims = sorted({int(m.group(1)) for k in pred_results
+                    for m in [re.fullmatch(r"ema_action0_(\d+)d", k)] if m})
+    if not _dims:
+        raise KeyError(f"no ema_action0_<N>d key in results; have {sorted(pred_results.keys())}")
+    _d = _dims[0]
+    variance_key = f"ema_action0_{_d}d"
+    gt_key = f"gt_action0_{_d}d"
+    mse_key = f"ema_action0_{_d}d_mse"
+    normalizer_key = f"action0_{_d}d"
 
     # unused_indices = [0]  # the 0-th frame is not used because of padding
 
@@ -213,8 +224,15 @@ def calc_statistics(pred_results_path: str, gripper_scale: float = 0.05, action_
     # ax.plot(errors[5])
     # plt.savefig("data/pick_and_place_back/2025-12-01/mse_episode_5.png")
     # plt.close()
-    # action_mask = torch.ones(10)
-    action_mask = torch.zeros(10)
+    # [JSC] ones, and sized to the actual action dim.
+    # Upstream ships `torch.zeros(10)` here with `torch.ones(10)` commented out directly
+    # above -- debug state left in the public release. Zeros make `outputs *= action_mask`
+    # and `temp_gt *= action_mask` identically zero, so every variance is 0 and every error is
+    # mse_loss(0, 0) = 0. The gate label is `with_mem_errors * threshold < no_mem_errors`,
+    # which is then `0 < 0` at every timestep: the gate would train on a constant False and
+    # learn that memory never helps, with nothing anywhere reporting a problem.
+    # The 10 was also wrong for us independently (8-d joint actions, not 3+6d+gripper).
+    action_mask = torch.ones(_d)
 
     for episode_idx in tqdm.tqdm(temp_results.keys(), desc="Calculating statistics"):
         frame_num = episode_frame_nums[episode_idx]
