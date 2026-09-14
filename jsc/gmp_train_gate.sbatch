@@ -43,6 +43,15 @@ if [ -z "$STATS" ]; then
 fi
 echo "statistics: $STATS"
 
+# In stage 4 the GATE is workspace.model, and memory_gate_config.yaml points its proprio at
+# ${...output_data_meta.robot0_10d} -- this repo's 10-d convention (3 position + 6d rotation +
+# gripper). Our Franka proprio is robot0_8d (7 joints + gripper), so composition dies with
+# InterpolationKeyError before a single batch is loaded. The task config's own memory_gate
+# block does NOT cover this: that one sets workspace.model.memory_gate.proprio_meta, which is
+# the path used when the gate is nested inside a POLICY, not when it is the model itself.
+# Single-quoted so the outer shell leaves the ${...} for hydra to resolve.
+PROPRIO_REF='\${workspace.train_dataset.output_data_meta.robot0_8d}'
+
 # Single quotes so $SLURM_NODEID expands PER TASK inside srun, not once on node 0 -- the
 # rendezvous trap that cost MemoryVLA a 15-minute timeout.
 # Single quotes so $SLURM_NODEID expands PER TASK inside srun, not once on the submitting
@@ -62,6 +71,7 @@ srun bash -c '
       ++workspace.train_dataset.compressed_dir=data/datasets/franka \
       ++workspace.train_dataset.normalizer_dir=data/datasets/franka \
       ++workspace.train_dataset.statistics_data_path='"$STATS"' \
+      ++workspace.model.proprio_meta='"$PROPRIO_REF"' \
       '"${ADDITIONAL_ARGS:-}"'
 '
 rc=$?

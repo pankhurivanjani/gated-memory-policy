@@ -39,7 +39,12 @@ export MASTER_PORT=$((29600 + SLURM_JOB_ID % 300))
 case "$POLICY" in
   pi)      policy_name="diffusion_transformer";        extra="" ;;
   pi_mem)  policy_name="diffusion_memory_transformer"; extra="+workspace.model.memory_gate=null" ;;
-  *) echo "POLICY must be pi or pi_mem"; exit 1 ;;
+  # pi_gated is the full method: the memory transformer plus the stage-4 gate, which stays
+  # FROZEN here (image_encoder.frozen and freeze_mlp are true in memory_gate.yaml; only
+  # train_memory_gate.yaml overrides them). So the gate is an input to this stage, not
+  # something it learns, and the driver passes its ckpt_path plus a pi_mem base checkpoint.
+  pi_gated) policy_name="diffusion_gated_transformer"; extra="" ;;
+  *) echo "POLICY must be pi, pi_mem or pi_gated"; exit 1 ;;
 esac
 
 run_name="${TASK}_${POLICY}"
