@@ -79,11 +79,50 @@ is cheap only because `compose_memory_gate_hydra_config` always composes
 
 ## 5. Train the gated policy
 
-Not yet run here. `diffusion_gated_transformer` inherits the memory transformer and adds the
-gate, which stays frozen during policy training (`memory_gate.yaml` defaults). Two mechanisms
-exist to avoid 21 fresh epochs and are worth trying before a from-scratch run:
-`MemoryGate(ckpt_path=...)` loads the stage-4 gate directly, and `load_base_ckpt` loads
-weights with `strict=False`, so the policy can warm-start from the `pi_mem` checkpoint.
+Run the driver instead of submitting stages 4 and 5 by hand; it chains 3 -> 4 -> 5 per task
+as each stage's output appears, and is safe to loop:
+
+    while true; do bash jsc/gmp_pipeline_driver.sh; sleep 600; done
+
+It launches stage 5 as
+
+    sbatch --nodes=4 -J gmp_<task>_pi_gated --export=ALL,TASK=<task>,POLICY=pi_gated,CHAIN=1,WANT_NODES=4,\
+      ADDITIONAL_ARGS="+workspace.model.memory_gate.ckpt_path=<gate epoch_20> +base_ckpt_path=<pi_mem epoch_20>" \
+      jsc/train_gmp.sbatch
+
+- The gate is **frozen** here (`memory_gate.yaml`); only `train_memory_gate.yaml` unfreezes it.
+  So the stage-4 checkpoint is an input to stage 5, loaded via `MemoryGate(ckpt_path=...)`.
+- `base_ckpt_path` warm-starts the policy from `pi_mem`. `load_base_ckpt` uses `strict=False`,
+  so the gate's absence from the `pi_mem` weights is expected, not an error.
+- The driver waits for a **completed** gate (final epoch AND no gate job queued). Globbing any
+  `epoch_*.ckpt` matches epoch 0 minutes into the run and starts `pi_gated` against an
+  untrained gate, which yields a plausible checkpoint rather than a failure.
+
+Measured on 4 GH200 nodes: gate 72-84 min; `pi_gated` 22 min/epoch (sponge), 37-42 min/epoch
+(plant, pottimer), so plant and pottimer cross the 12 h cap once and chain.
+
+### What the labels say
+
+Memory helps at 98.7-100% of labelled timesteps on all three tasks, a ~5x error reduction.
+A correctly trained gate therefore converges to "always on", and `pi_gated` will track `pi_mem`
+closely; pottimer is the only task with real structure (80% at a 2x threshold). Note the labels
+are computed on the **train** split, where both arms have seen the data, so the gap is an upper
+bound on what memory buys rather than an estimate of it.
+
+## 6b. Open-loop MAE against the SSM policy -- UNVALIDATED
+
+    sbatch -J gmp_eval --export=ALL,TASK=<task>,ARM=pi_mem,H=4 jsc/openloop_gmp.sbatch
+
+`imitation-learning-policies/jsc/openloop_gmp.py` rebuilds the policy from the checkpoint's own
+config, normalizes with the checkpoint's normalizer, and calls `policy.reset()` between episodes.
+
+**Do not report its numbers yet.** On one sponge episode it gave MAE 0.034 for `pi_mem` at h=4,
+against 0.004 for the SSM policy on the same frames -- while GMP's own statistics show `pi_mem`
+fitting that data at 6e-6 normalized error. A policy that nearly memorizes its training data
+cannot also be 9x worse than ours on it, so the harness is wrong somewhere. Candidates, in order:
+whether `predict_action` at `traj_length=1` actually populates `history_img_features_dict`
+(it may only fill on the multi-trajectory training path); whether the 224->256 bilinear resize
+matches the task config's `Resize`; and whether the returned action is a chunk or a single step.
 
 ## Splits
 
